@@ -71,20 +71,23 @@ s3 = boto3.client(
 
 biolucida_lock = Lock()
 
-try:
-    maptable = MapTable(Config.DATABASE_URL)
-except AttributeError:
-    maptable = None
+maptable = None
+# try:
+#     maptable = MapTable(Config.DATABASE_URL)
+# except AttributeError:
+#     maptable = None
 
-try:
-    scaffoldtable = ScaffoldTable(Config.DATABASE_URL)
-except AttributeError:
-    scaffoldtable = None
+scaffoldtable = None
+# try:
+#     scaffoldtable = ScaffoldTable(Config.DATABASE_URL)
+# except AttributeError:
+#     scaffoldtable = None
 
-try:
-    featuredDatasetIdSelectorTable = FeaturedDatasetIdSelectorTable(Config.DATABASE_URL)
-except AttributeError:
-    featuredDatasetIdSelectorTable = None
+featuredDatasetIdSelectorTable = None
+# try:
+#     featuredDatasetIdSelectorTable = FeaturedDatasetIdSelectorTable(Config.DATABASE_URL)
+# except AttributeError:
+#     featuredDatasetIdSelectorTable = None
 
 
 class Biolucida(object):
