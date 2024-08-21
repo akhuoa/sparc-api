@@ -88,3 +88,15 @@ def map_mime_type(mime_type, obj):
         return MAPPED_MIME_TYPES[lower_mime_type]
 
     return NOT_SPECIFIED
+
+
+def get_mimetypes_from_types(types):
+    mimetypes = []
+
+    if len(types) > 0:
+        for type in types:
+            for key, value in MAPPED_MIME_TYPES.items():
+                if value == type:
+                    mimetypes.append(key)
+
+    return mimetypes

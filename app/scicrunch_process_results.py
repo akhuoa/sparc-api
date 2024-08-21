@@ -3,7 +3,8 @@ import json
 import re
 from app.config import Config
 from flask import jsonify
-from app.scicrunch_processing_common import SKIPPED_OBJ_ATTRIBUTES
+from app.scicrunch_processing_common import MAPPED_MIME_TYPES, SKIPPED_OBJ_ATTRIBUTES
+from app.manifest_name_to_discover_name import name_map
 
 
 def convert_patch_to_X(version):
@@ -230,6 +231,82 @@ def reform_curies_results(data):
             'name': id_name_map[key]
         }
         result['uberon']['array'].append(pair)
+
+    return result
+
+# Turn the result into a list in the uberon.array field
+def reform_ids_results(data):
+    result = {
+        'ids': { }
+    }
+
+    # Iterate through to get an uberon - ids map
+    for key, item in data['aggregations']['f']['buckets'].items():
+        try:
+            ids = []
+            for bucket in item['id']['buckets']:
+                ids.append(bucket['key'])
+            result['ids'][key] = ids
+        except KeyError:
+            continue
+
+    return result
+
+def extraListValues(text):
+    my_list = []
+    v = text.split(',')
+    for path in v:
+        if path:
+            #Remove any leading or trailing space
+            path = path.strip()
+            my_list.append(path)
+    return my_list
+
+# Turn the result into a list in the uberon.array field
+# The output from the source data is in a command separate 
+# list with value
+# of the following properties:
+# dataset id, version, file path, mimetype, additional_mimetype,
+# biolucida id, mimetype. is source of, is derived from
+# This will turn it into json format
+def reform_files_info_results(data):
+    result = {
+        'files_info': { }
+    }
+    # Iterate through to get an uberon - ids map
+    print(data)
+    for key, item in data['aggregations']['f']['buckets'].items():
+        try:
+            files_info = []
+            for bucket in item['files_info']['buckets']:
+                s = bucket['key']
+                file_info = {}
+                v = s.split(',')
+                file_info['id'] = v[0]
+                file_info['version'] = v[1]
+                file_path = 'files/' + v[2]  # Add the part we split on back
+                file_path = name_map.get(file_path, file_path).removeprefix('files/')
+                file_info['file_path'] = file_path
+                file_info['mimetype'] = v[3]
+                file_info['additional_mimetype'] = v[4]
+                if v[4] in MAPPED_MIME_TYPES:
+                    file_info['type'] = MAPPED_MIME_TYPES[v[4]]
+                else:
+                    file_info['type'] = ''
+                file_info['biolucida_id'] = v[5]
+                #is source if and is derived from are list values
+                l = s.split('[')
+                #remove last trailing ]
+                s_l = l[1][:-2]
+                file_info['species'] = extraListValues(s_l)
+                is_l = l[2][:-2]        
+                file_info['isSourceOf'] = extraListValues(is_l)
+                id_l = l[3][:-1]
+                file_info['isDerivedFrom'] = extraListValues(id_l)
+                files_info.append(file_info)
+            result['files_info'][key] = files_info
+        except KeyError:
+            continue
 
     return result
 
