@@ -274,7 +274,6 @@ def reform_files_info_results(data):
         'files_info': { }
     }
     # Iterate through to get an uberon - ids map
-    print(data)
     for key, item in data['aggregations']['f']['buckets'].items():
         try:
             files_info = []

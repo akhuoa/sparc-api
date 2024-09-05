@@ -509,6 +509,21 @@ def test_getting_files_info(client):
     total = len(results['files_info']['UBERON:0000948'])
     assert total > 0
 
+def test_getting_scaffold_files_info(client):
+    # mock json for testing
+    test_data = {
+        "filetypes" : ["abi-thumbnail", "abi-scaffold-metadata-file", "abi-scaffold-view-file"],
+        "curies": ["UBERON:0000948", "UBERON:0000945"]
+    }
+
+    r = client.post(f"/get-files-info-for-curies", json = test_data)
+    results = json.loads(r.data)
+    assert bool(results)
+    total = len(results['files_info']['UBERON:0000945'])
+    assert total > 0
+    total = len(results['files_info']['UBERON:0000948'])
+    assert total > 0
+
 def test_get_related_terms(client):
     # Test if we can get the uberon term of heart using the uberon term
     # of left ventricle
