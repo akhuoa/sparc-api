@@ -4,6 +4,11 @@ from app.config import Config
 import requests
 import random
 import string
+import hmac
+import hashlib
+import base64
+import time
+import json
 
 from requests.auth import HTTPBasicAuth
 
@@ -16,11 +21,11 @@ def client():
 
 
 def test_direct_download_url_small_file(client):
-    small_s3_file = '76/files/derivative/mouseColon_metadata.json'
+    small_s3_file = '217/files/derivative/brainstem_pig_metadata.json'
     r = client.get(f"/s3-resource/{small_s3_file}?s3BucketName=prd-sparc-discover50-use1")
 
     assert r.status_code == 200
-    assert b"proximal colon" in r.data
+    assert b"medulla" in r.data
 
 def test_direct_download_url_new_bucket_file(client):
     new_s3_file = '307%2Ffiles%2Fderivative%2Fhuman_body_metadata.json'
@@ -31,7 +36,7 @@ def test_direct_download_url_new_bucket_file(client):
 
 
 def test_direct_download_url_thumbnail(client):
-    small_s3_file = '95/files/derivative%2FhumanColon_Layout1_thumbnail.jpeg'
+    small_s3_file = '95/files/derivative%2FcolonHuman_Layout1_thumbnail.jpeg'
     r = client.get(f"/s3-resource/{small_s3_file}?s3BucketName=prd-sparc-discover50-use1")
 
     assert r.status_code == 200
@@ -151,31 +156,60 @@ def test_create_wrike_task(client):
     )
     assert resp.status_code == 200
 
+def test_get_hubspot_contact(client):
+    r = client.get(f"/hubspot_contact_properties/hubspot_webhook_test@test.com")
+    assert r.status_code == 200
 
-def test_subscribe_to_mailchimp(client):
-    r = client.post(f"/mailchimp_subscribe", json={})
-    assert r.status_code == 400
-
-    letters = string.ascii_lowercase
-    email = ''.join(random.choice(letters) for i in range(8))
-    domain = ''.join(random.choice(letters) for i in range(6))
-
-    email_address = '{}@{}.com'.format(email, domain)
-
-    r2 = client.post(f"/mailchimp_subscribe", json={"email_address": email_address, "first_name": "Test", "last_name": "User"})
-    assert r2.status_code == 200
-
-    # this part is only for cleaning the mailchimp list and not pollute the mailing list
-    returned_data = r2.get_json()
-    member_hash = returned_data["id"]
-    url = 'https://us2.api.mailchimp.com/3.0/lists/c81a347bd8/members/{}/actions/delete-permanent'.format(member_hash)
-    auth = HTTPBasicAuth('AnyUser', Config.MAILCHIMP_API_KEY)
-    resp = requests.post(
-        url=url,
-        auth=auth
+def test_subscribe_to_newsletter(client):
+    http_method = "POST"
+    endpoint = "/subscribe_to_newsletter"
+    base_url = "http://localhost"  # Default for Flask test client
+    full_url = f"{base_url}{endpoint}"
+    mock_body = {"email_address":"hubspot_webhook_test@test.com","first_name":"Test Hubspot Webhook","last_name":"Do Not Delete"}
+    response = client.post(
+        endpoint,
+        json=mock_body,
+        headers={
+            "Content-Type": "application/json"
+        }
     )
-    assert resp.status_code == 204
+    assert response.status_code == 200
 
+def test_hubspot_webhook(client):
+    http_method = "POST"
+    endpoint = "/hubspot_webhook"
+    base_url = "http://localhost"  # Default for Flask test client
+    full_url = f"{base_url}{endpoint}"
+    # mock a property changed event firing for test Hubspot contact
+    mock_body = [{"subscriptionType":"contact.propertyChange","objectId":"83944215465"}]
+    # The timestamp must be a Unix epoch time within 5 minutes (300 seconds) of the current time when the webhook request is received.
+    valid_timestamp = int(time.time())
+    # Concatenate the string as HubSpot does
+    raw_json = json.dumps(mock_body, separators=(",", ":"))
+    data_to_sign = f'{http_method}{full_url}{raw_json}{valid_timestamp}'
+
+    # Generate the HMAC SHA256 signature
+    signature = hmac.new(
+        key=Config.HUBSPOT_CLIENT_SECRET.encode('utf-8'),
+        msg=data_to_sign.encode('utf-8'),
+        digestmod=hashlib.sha256
+    ).digest()
+
+    # Encode the signature in Base64
+    mock_signature = base64.b64encode(signature).decode()
+    # Send a mock POST request
+    response = client.post(
+        endpoint,
+        data=raw_json,
+        headers={
+            "Content-Type": "application/json",
+            "X-HubSpot-Signature-Version": "v3",
+            "X-Hubspot-Signature-v3": mock_signature,
+            "X-HubSpot-Request-Timestamp": str(valid_timestamp),
+        }
+    )
+
+    assert response.status_code == 200
 
 def test_osparc_viewers(client):
     r = client.get('/get_osparc_data')
@@ -219,3 +253,31 @@ def test_get_featured_datasets(client):
     json = r.get_json()
     assert 'identifiers' in json
     assert type(json['identifiers']) == list
+
+def test_get_reva_subject_ids(client):
+    r = client.get('/reva/subject-ids')
+    assert r.status_code == 200
+    json = r.get_json()
+    assert 'ids' in json
+    assert type(json['ids']) == list
+
+def test_get_reva_tracing_files(client):
+    r = client.get('/reva/tracing-files/sub-SR005')
+    assert r.status_code == 200
+    json = r.get_json()
+    assert 'files' in json
+    assert type(json['files']) == list
+
+def test_get_reva_micro_ct_files(client):
+    r = client.get('/reva/micro-ct-files/sub-SR005')
+    assert r.status_code == 200
+    json = r.get_json()
+    assert 'files' in json
+    assert type(json['files']) == list
+
+def test_get_reva_landmarks_files(client):
+    r = client.get('/reva/anatomical-landmarks-files/sub-SR005')
+    assert r.status_code == 200
+    json = r.get_json()
+    assert 'folders' in json
+    assert type(json['folders']) == list
