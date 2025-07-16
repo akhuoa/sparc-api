@@ -7,9 +7,11 @@ from app.metrics.algolia import get_dataset_count, init_algolia_client, get_all_
 from app.metrics.ga import init_ga_reporting, get_ga_1year_sessions
 from scripts.monthly_stats import MonthlyStats
 from scripts.update_featured_dataset_id import set_featured_dataset_id, get_featured_dataset_id_table_state
+from scripts.update_protocol_metrics import update_protocol_metrics, get_protocol_metrics_table_state
 from app.osparc.services import OSparcServices
 
 import botocore
+import markdown
 import boto3
 import hashlib
 import hmac
@@ -21,7 +23,7 @@ import json
 import logging
 import re
 import requests
-import threading
+import uuid
 from urllib.parse import urlparse
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -44,13 +46,13 @@ from flask_caching import Cache
 from app.scicrunch_requests import create_doi_query, create_filter_request, create_facet_query, create_doi_aggregate, create_title_query, \
     create_identifier_query, create_pennsieve_identifier_query, create_field_query, create_request_body_for_curies_aggregations, create_onto_term_query, \
     create_multiple_doi_query, create_multiple_discoverId_query, create_anatomy_query, get_body_scaffold_dataset_id, \
-    create_multiple_mimetype_query, create_request_body_for_ids_aggregations, create_request_body_for_files_info_aggregations
-from scripts.email_sender import EmailSender, feedback_email, general_interest_email, issue_reporting_email, creation_request_confirmation_email, service_interest_email
+    create_multiple_mimetype_query, create_citations_query
+from scripts.email_sender import EmailSender, feedback_email, general_interest_email, issue_reporting_email, creation_request_confirmation_email, anbc_form_creation_request_confirmation_email, service_form_submission_request_confirmation_email
 from threading import Lock
 from xml.etree import ElementTree
 
 from app.config import Config
-from app.dbtable import MapTable, ScaffoldTable, FeaturedDatasetIdSelectorTable
+from app.dbtable import AnnotationTable, MapTable, ScaffoldTable, FeaturedDatasetIdSelectorTable, ProtocolMetricsTable
 from app.scicrunch_process_results import process_results, process_get_first_scaffold_info, reform_aggregation_results, \
     reform_curies_results, reform_dataset_results, reform_related_terms, reform_anatomy_results, reform_ids_results, \
     reform_files_info_results
@@ -93,6 +95,11 @@ if db_url and db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
 try:
+    annotationtable = AnnotationTable(db_url)
+except AttributeError:
+    annotationtable = None
+
+try:
     maptable = MapTable(db_url)
 except AttributeError:
     maptable = None
@@ -106,6 +113,12 @@ try:
     featuredDatasetIdSelectorTable = FeaturedDatasetIdSelectorTable(db_url)
 except AttributeError:
     featuredDatasetIdSelectorTable = None
+
+try:
+    protocolMetricsTable = ProtocolMetricsTable(db_url)
+except AttributeError:
+    protocolMetricsTable = None
+
 
 class Biolucida(object):
     _token = ''
@@ -174,12 +187,21 @@ metrics_scheduler = BackgroundScheduler()
 services_scheduler = BackgroundScheduler()
 featured_dataset_id_scheduler = BackgroundScheduler()
 update_contentful_event_entries_scheduler = BackgroundScheduler()
+protocol_metrics_scheduler = BackgroundScheduler()
+
+# If nothing is stored in the DB than update it now
+protocol_metrics = get_protocol_metrics_table_state(protocolMetricsTable)
+if Config.SPARC_API_DEBUGGING == 'FALSE' and (protocol_metrics is None or protocol_metrics.get('total_protocol_views') == -1):
+    update_protocol_metrics()
+
+if not protocol_metrics_scheduler.running:
+    logging.info('Starting scheduler for protocol metrics acquisition')
+    protocol_metrics_scheduler.start()
 
 if not featured_dataset_id_scheduler.running:
     logging.info('Starting scheduler for featured dataset id acquisition')
     featured_dataset_id_scheduler.start()
 
-# Run monthly stats email schedule on production
 if Config.DEPLOY_ENV == 'production':
     monthly_stats_email_scheduler = BackgroundScheduler()
     ms = MonthlyStats()
@@ -191,6 +213,14 @@ if Config.DEPLOY_ENV == 'production':
     monthly_stats_email_scheduler.add_job(ms.monthly_stats_required_check, 'cron',
                                           year='*', month='*', day='1', hour='2', minute=0, second=0)
 
+# Run monthly annotation states clean up
+if annotationtable:
+    annotation_cleanup_scheduler = BackgroundScheduler()
+    annotation_cleanup_scheduler.start()
+    # Check on the second of each month at 2am
+    annotation_cleanup_scheduler.add_job(annotationtable.removeExpiredState, 'cron',
+                                         year='*', month='*', day='2', hour='2', minute=0, second=0)
+
 # Only need to run the update contentful entries scheduler on one environment, so dev was chosen to keep prod more responsive
 if Config.DEPLOY_ENV == 'development' and Config.SPARC_API_DEBUGGING == 'FALSE':
     if not update_contentful_event_entries_scheduler.running:
@@ -200,7 +230,6 @@ if Config.DEPLOY_ENV == 'development' and Config.SPARC_API_DEBUGGING == 'FALSE':
     update_contentful_event_entries_scheduler.add_job(update_all_events_sort_order, 'cron', hour=2, timezone='US/Eastern')
 
 osparc_data = {}
-
 
 @app.before_first_request
 def get_osparc_file_viewers():
@@ -276,6 +305,9 @@ metrics_scheduler.add_job(func=get_metrics, trigger='interval', hours=3)
 featured_dataset_id_trigger = OrTrigger([DateTrigger(), IntervalTrigger(hours=1)])
 featured_dataset_id_scheduler.add_job(lambda: set_featured_dataset_id(featuredDatasetIdSelectorTable), featured_dataset_id_trigger)
 
+# Update the protocol metrics once a week on saturday at midnight
+if Config.SPARC_API_DEBUGGING == 'FALSE':
+    protocol_metrics_scheduler.add_job(update_protocol_metrics, 'cron', day_of_week='sat', hour=0, minute=0)
 
 def shutdown_schedulers():
     logging.info('Stopping scheduler for oSPARC viewers acquisition')
@@ -290,6 +322,9 @@ def shutdown_schedulers():
     logging.info('Stopping scheduler for updating featured dataset id')
     if featured_dataset_id_scheduler.running:
         featured_dataset_id_scheduler.shutdown()
+    logging.info('Stopping scheduler for updating protocol metrics')
+    if protocol_metrics_scheduler.running:
+        protocol_metrics_scheduler.shutdown()
     logging.info('Stopping scheduler for oSPARC services')
     if services_scheduler.running:
         services_scheduler.shutdown()
@@ -1257,10 +1292,8 @@ def authenticate_biolucida():
 
 
 def get_share_link(table):
-    # Do not commit to database when testing
+    # Commit to database even when testing since the Table re-creates a new session each time to prevent stale sessions
     commit = True
-    if app.config["TESTING"]:
-        commit = False
     if table:
         json_data = request.get_json()
         if json_data and 'state' in json_data:
@@ -1283,6 +1316,18 @@ def get_saved_state(table):
         abort(400, description="Key missing or did not find a match")
     else:
         abort(404, description="Database not available")
+
+
+# Get the share link for the current map content.
+@app.route("/annotation/getshareid", methods=["POST"])
+def get_annotation_share_link():
+    return get_share_link(annotationtable)
+
+
+# Get the map state using the share link id.
+@app.route("/annotation/getstate", methods=["POST"])
+def get_annotation_state():
+    return get_saved_state(annotationtable)
 
 
 # Get the share link for the current map content.
@@ -1309,6 +1354,374 @@ def get_scaffold_state():
     return get_saved_state(scaffoldtable)
 
 
+def verify_recaptcha(token):
+    try:
+        captchaReq = requests.post(
+            url=Config.TURNSTILE_URL,
+            json={
+                "secret": Config.NUXT_TURNSTILE_SECRET_KEY,
+                "response": token
+            }
+        )
+        captchaResp = captchaReq.json()
+        if "success" not in captchaResp or not captchaResp["success"]:
+            return {"error": "Failed Captcha Validation"}, 409
+        return captchaResp.get('success', False)
+    except Exception as ex:
+        logging.error("Could not validate captcha, bypassing validation", ex)
+
+
+def create_github_issue(title, body, labels=None, assignees=None):
+    url = f"https://api.github.com/repos/{Config.SPARC_GITHUB_ORG}/{Config.SPARC_ISSUES_GITHUB_REPO}/issues"
+    headers = {
+        "Authorization": f"token {Config.SPARC_TECH_LEADS_GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json"
+    }
+
+    data = {
+        "title": title,
+        "body": body,
+    }
+
+    if labels:
+        data["labels"] = labels
+
+    if assignees:
+        data["assignees"] = assignees
+
+    response = requests.post(url, json=data, headers=headers)
+
+    if response.status_code == 201:
+        response_json = response.json()
+        return {
+            "html_url": response_json["html_url"],
+            "comments_url": response_json["comments_url"],
+            "issue_api_url": response_json["url"]
+        }
+    else:
+        raise Exception(f"GitHub Issue creation failed: {response.text}")
+
+
+@app.route("/create_issue", methods=["POST"])
+def create_issue():
+    form = request.form
+    recaptcha_token = request.form.get('captcha_token')
+    if not app.config['TESTING'] and (not recaptcha_token or not verify_recaptcha(recaptcha_token)):
+        return jsonify({'error': 'Invalid reCAPTCHA'}), 400
+
+    task_type = form.get("type", "bug")
+    title = form.get("title")
+    issue_body = form.get("body")
+    if not title or not issue_body:
+        abort(400, description="Missing title or body")
+    email = form.get("email", "").strip()
+    if task_type in ["bug", "feedback", "test"]:
+        try:
+            issue = create_github_issue(title.strip(), issue_body, labels=[task_type], assignees=Config.GITHUB_ISSUE_ASSIGNEES)
+            issue_url = issue['html_url']
+            comments_url = issue['comments_url']
+            issue_api_url = issue['issue_api_url']
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    else:
+        return jsonify({"error": f"Unsupported task type: {task_type}"}), 400
+
+    # default to this if there is no issue_url
+    response_message = 'Submission could not be created'
+    status_code = 500
+    response_status = 'error'
+    if (issue_url):
+        response_message = 'Submission created successfully. '
+        status_code = 201
+        response_status = 'success'
+        files = request.files
+        # host the file on the dummy sparc repo and add the viewable url as a comment to the newly created ticket
+        if files and 'attachment' in files:
+            attachment = files['attachment']
+            file_content = attachment.read()
+            file_name = attachment.filename
+
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            unique_id = uuid.uuid4().hex
+            unique_filename = f"{timestamp}_{unique_id}_{file_name}"
+
+            url = f"https://api.github.com/repos/{Config.SPARC_GITHUB_ORG}/{Config.SPARC_ISSUES_GITHUB_REPO}/contents/attachments/{unique_filename}"
+            headers = {
+                "Authorization": f"token {Config.SPARC_TECH_LEADS_GITHUB_TOKEN}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28"
+            }
+
+            encoded_content = base64.b64encode(file_content).decode('utf-8')
+
+            data = {
+                "message": f"Add file {unique_filename}",
+                "content": encoded_content
+            }
+            try:
+                response = requests.put(url, headers=headers, json=data)
+                if response.status_code in (200, 201):
+                    json_response = response.json()
+                    image_url = json_response["content"]["download_url"]
+                    comment_body = f"![Issue Attachment]({image_url})"
+                    headers = {
+                        "Authorization": f"token {Config.SPARC_TECH_LEADS_GITHUB_TOKEN}",
+                        "Accept": "application/vnd.github+json"
+                    }
+
+                    data = {
+                        "body": comment_body
+                    }
+
+                    response = requests.post(comments_url, json=data, headers=headers)
+
+                    if response.status_code != 201:
+                        response_message += 'File attachment unsuccessful. '
+                        status_code = 201
+                        response_status = 'warning'
+                    else:
+                        response_message += 'File attachment successful. '
+                else:
+                    response_message += 'File upload unsuccessful. '
+                    status_code = 201
+                    response_status = 'warning'
+            except Exception as e:
+                response_message += 'File upload unsuccessful. '
+                status_code = 201
+                response_status = 'warning'
+        if email:
+            # default to bug form if task type not specified
+            subject = 'SPARC Reported Issue Submission'
+            email_body = issue_reporting_email.substitute({'message': issue_body})
+            if (task_type == "feedback"):
+                subject = 'SPARC Reported Feedback Submission'
+                email_body = feedback_email.substitute({'message': issue_body})
+            html_body = markdown.markdown(email_body)
+            try:
+                email_sender.sendgrid_email(Config.SES_SENDER, email, subject, html_body)
+                response_message += 'Confirmation email sent to user successful. '
+            except Exception as e:
+                response_message += 'Confirmation email sent to user unsuccessful. '
+                status_code = 201
+                response_status = 'warning'
+    return jsonify({"message": response_message, "url": issue_url, "issue_api_url": issue_api_url, "status": response_status}), status_code
+
+def get_hubspot_contact(email, firstname, lastname):
+    search_url = f"{Config.HUBSPOT_V3_API}/objects/contacts/search"
+    search_body = {
+        "filterGroups": [
+            {
+                "filters": [
+                    {
+                        "propertyName": "email",
+                        "operator": "EQ",
+                        "value": email
+                    }
+                ]
+            }
+        ],
+        "properties": ["email"],
+        "limit": 1
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + Config.HUBSPOT_API_TOKEN
+    }
+
+    search_results = requests.post(search_url, headers=headers, json=search_body)
+    search_data = search_results.json()
+    contact_id = None
+
+    if search_data.get("results"):
+        contact_id = search_data["results"][0]["id"]
+    else:
+        # Create contact if not found
+        create_contact_url = f"{Config.HUBSPOT_V3_API}/objects/contacts"
+        contact_body = {
+            "properties": {
+                "email": email,
+                "firstname": firstname,
+                "lastname": lastname
+            }
+        }
+        create_res = requests.post(create_contact_url, headers=headers, json=contact_body)
+        if not create_res.ok:
+            raise Exception(f"Hubspot contact creation failed: {create_res.status_code} {create_res.text}")
+        contact_id = create_res.json()["id"]
+    return contact_id
+
+def create_hubspot_deal(name, stage, pipeline, lead_source=None):
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + Config.HUBSPOT_API_TOKEN
+    }
+    create_deal_url = f"{Config.HUBSPOT_V3_API}/objects/deals"
+    deal_body = {
+        "properties": {
+            "dealname": name,
+            "dealstage": stage,
+            "pipeline": pipeline,
+            "lead_source_in_deal": lead_source
+        }
+    }
+
+    deal_res = requests.post(create_deal_url, headers=headers, json=deal_body)
+    if not deal_res.ok:
+        raise Exception(f"Hubspot deal creation failed: {deal_res.status_code} {deal_res.text}")
+    deal_id = deal_res.json()["id"]
+    return deal_id
+
+def create_hubspot_note(body, deal_id, contact_id):
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + Config.HUBSPOT_API_TOKEN
+    }
+    note_url = f"{Config.HUBSPOT_V3_API}/objects/notes"
+    hs_timestamp = int(datetime.utcnow().timestamp() * 1000)
+    note_payload = {
+        "properties": {
+            "hs_note_body": body,
+            "hs_timestamp": hs_timestamp
+        }
+    }
+
+    note_res = requests.post(note_url, headers=headers, json=note_payload)
+    if not note_res.ok:
+        raise Exception(f"HubSpot note creation failed: {note_res.status_code} {note_res.text}")
+
+    note_id = note_res.json()["id"]
+
+    # Step 2: Associate the note to deal
+    associate_note_to_deal_url = f"{Config.HUBSPOT_V3_API}/objects/notes/{note_id}/associations/deals/{deal_id}/note_to_deal"
+    associate_res_deal = requests.put(associate_note_to_deal_url, headers=headers)
+    if not associate_res_deal.ok:
+        raise Exception(f"Failed to associate note to deal: {associate_res_deal.status_code} {associate_res_deal.text}")
+
+    # Step 3: Associate the note to contact
+    associate_note_to_contact_url = f"{Config.HUBSPOT_V3_API}/objects/notes/{note_id}/associations/contacts/{contact_id}/note_to_contact"
+    associate_res_contact = requests.put(associate_note_to_contact_url, headers=headers)
+    if not associate_res_contact.ok:
+        raise Exception(f"Failed to associate note to contact: {associate_res_contact.status_code} {associate_res_contact.text}")
+
+    return note_id
+
+def associate_hubspot_deal_with_contact(deal_id, contact_id):
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + Config.HUBSPOT_API_TOKEN
+    }
+    associate_url = f"{Config.HUBSPOT_V3_API}/objects/deals/{deal_id}/associations/contacts/{contact_id}/deal_to_contact"
+    assoc_res = requests.put(associate_url, headers=headers)
+
+    if not assoc_res.ok:
+        raise Exception(f"HubSpot deal to contact association failed: {assoc_res.status_code} {assoc_res.text}")
+
+    return assoc_res.json()
+
+@app.route("/submit_data_inquiry", methods=["POST"])
+def submit_data_inquiry():
+    form = request.form
+    recaptcha_token = request.form.get('captcha_token')
+    if not app.config['TESTING'] and (not recaptcha_token or not verify_recaptcha(recaptcha_token)):
+        return jsonify({'error': 'Invalid reCAPTCHA'}), 400
+    email = form.get("email", "").strip()
+    firstname = form.get("firstname", "").strip()
+    lastname = form.get("lastname", "").strip()
+    task_type = form.get("type", "")
+    is_anbc_form = form.get("isAnbcForm", "false")
+    title = form.get("title").strip()
+    body = form.get("body").strip()
+    is_service_form = form.get("isServiceForm", "false")
+    if not title or not body or not email or not firstname or not lastname:
+        return jsonify({"error": "Missing title, body, email, first name, or last name"}), 400
+    if task_type not in ["research","interest"]:
+        return jsonify({"error": f"Unsupported task type: {task_type}"}), 400
+
+    contact_id = None
+    deal_id = None
+    note_id = None
+    deal_pipeline = Config.HUBSPOT_ONBOARDING_PIPELINE_ID if task_type == "research" else Config.HUBSPOT_GRANT_SEEKER_PIPELINE_ID
+    deal_stage = Config.HUBSPOT_ONBOARDING_PIPELINE_INITIAL_STAGE_ID if task_type == "research" else Config.HUBSPOT_GRANT_SEEKER_PIPELINE_INITIAL_STAGE_ID
+    deal_lead_source = Config.ANBC_LEAD_SOURCE if is_anbc_form == 'true' else None
+    partial_success = {}
+    try:
+        contact_id = get_hubspot_contact(email, firstname, lastname)
+    except Exception as e:
+        return jsonify({
+            "error": "Failed to create or retrieve contact. ",
+            "details": str(e)
+        }), 500
+
+    try:
+        deal_id = create_hubspot_deal(title, deal_stage, deal_pipeline, deal_lead_source)
+    except Exception as e:
+        return jsonify({
+            "error": "Failed to create deal. ",
+            "contact_id": contact_id,
+            "details": str(e)
+        }), 500
+
+    try:
+        associate_hubspot_deal_with_contact(deal_id, contact_id)
+    except Exception as e:
+        return jsonify({
+            "error": "Failed to associate deal with contact. ",
+            "contact_id": contact_id,
+            "deal_id": deal_id,
+            "details": str(e)
+        }), 500
+
+    try:
+        # Create a note containing the form body and associate it to the contact and deal
+        note_id = create_hubspot_note(body, deal_id, contact_id)
+    except Exception as e:
+        # Don't fail the whole submission — just inform the user
+        partial_success = {
+            "warning": "Request successfully submitted, but note creation failed. ",
+            "contact_id": contact_id,
+            "deal_id": deal_id,
+            "details": str(e)
+        }
+
+    response = {
+        "message": "Request successfully submitted. ",
+        "status": "success",
+        "contact_id": contact_id,
+        "deal_id": deal_id,
+        "note_id": note_id
+    }
+
+    if email:
+        subject = 'SPARC Form Submission Confirmation'
+        email_body = ''
+        if is_service_form == 'true':
+            email_body = service_form_submission_request_confirmation_email.substitute({'name': firstname, 'message': body})
+        else:
+            email_body = anbc_form_creation_request_confirmation_email.substitute({'name': firstname, 'message': body}) if is_anbc_form == 'true' else creation_request_confirmation_email.substitute({'name': firstname, 'message': body})
+        html_body = markdown.markdown(email_body)
+        try:
+            email_sender.sendgrid_email(Config.SES_SENDER, email, subject, html_body, Config.SERVICES_EMAIL)
+            response['message'] = response.get('message', '') + 'Confirmation email sent to user successfully. '
+            if partial_success:
+                partial_success['warning'] = partial_success.get('warning', '') + 'Confirmation email sent to user successfully. '
+        except Exception as e:
+            if partial_success:
+                partial_success['warning'] = partial_success.get('warning', '') + 'Confirmation email sent to user unsuccessful. '
+                partial_success['details'] = partial_success.get('details', '') + str(e)
+            else:
+                partial_success = {
+                    "warning": "Request successfully submitted, but confirmation email sent to user unsuccessful.",
+                    "contact_id": contact_id,
+                    "deal_id": deal_id,
+                    "details": str(e)
+                }
+
+    if partial_success:
+        response.update(partial_success)
+        return jsonify(response), 207
+
+    return jsonify(response), 201
+
 @app.route("/tasks", methods=["POST"])
 def create_wrike_task():
     form = request.form
@@ -1328,14 +1741,14 @@ def create_wrike_task():
             logging.error("Could not validate captcha, bypassing validation", ex)
     elif not app.config['TESTING']:
         return {"error": "Failed Captcha Validation"}, 409
-    # captcha all good
+    # Captcha all good
     if form and 'title' in form and 'description' in form:
         title = form["title"]
         description = form["description"]
         newTaskDescription = form["description"]
 
         hed = {'Authorization': 'Bearer ' + Config.WRIKE_TOKEN}
-        ## Updated Wrike Space info based off type of task. We default to drc_feedback folder if type is not present.
+        # Updated Wrike Space info based off type of task. We default to drc_feedback folder if type is not present.
         url = 'https://www.wrike.com/api/v4/folders/' + Config.DRC_FEEDBACK_FOLDER_ID + '/tasks'
         followers = [Config.CCB_HEAD_WRIKE_ID, Config.DAT_CORE_TECH_LEAD_WRIKE_ID, Config.MAP_CORE_TECH_LEAD_WRIKE_ID, Config.K_CORE_TECH_LEAD_WRIKE_ID,
                      Config.SIM_CORE_TECH_LEAD_WRIKE_ID, Config.MODERATOR_WRIKE_ID]
@@ -1347,35 +1760,35 @@ def create_wrike_task():
         templateSubTaskIds = []
         if form and 'type' in form:
             taskType = form["type"]
-        if (taskType == "news"):
+        if taskType == "news":
             url = 'https://www.wrike.com/api/v4/folders/' + Config.NEWS_AND_EVENTS_FOLDER_ID + '/tasks'
             followers = [Config.COMMS_LEAD_1_WRIKE_ID, Config.COMMS_LEAD_2_WRIKE_ID, Config.COMMS_LEAD_3_WRIKE_ID]
             responsibles = [Config.COMMS_LEAD_1_WRIKE_ID, Config.COMMS_LEAD_2_WRIKE_ID, Config.COMMS_LEAD_3_WRIKE_ID]
             customStatus = Config.COMMS_WRIKE_CUSTOM_STATUS_ID
             templateTaskId = Config.NEWS_TEMPLATE_TASK_ID
-        if (taskType == "event"):
+        if taskType == "event":
             url = 'https://www.wrike.com/api/v4/folders/' + Config.NEWS_AND_EVENTS_FOLDER_ID + '/tasks'
             followers = [Config.COMMS_LEAD_1_WRIKE_ID, Config.COMMS_LEAD_2_WRIKE_ID, Config.COMMS_LEAD_3_WRIKE_ID]
             responsibles = [Config.COMMS_LEAD_1_WRIKE_ID, Config.COMMS_LEAD_2_WRIKE_ID, Config.COMMS_LEAD_3_WRIKE_ID]
             customStatus = Config.COMMS_WRIKE_CUSTOM_STATUS_ID
             templateTaskId = Config.EVENT_TEMPLATE_TASK_ID
-        elif (taskType == "toolsAndResources"):
+        elif taskType == "toolsAndResources":
             url = 'https://www.wrike.com/api/v4/folders/' + Config.TOOLS_AND_RESOURCES_FOLDER_ID + '/tasks'
             followers = [Config.COMMS_LEAD_1_WRIKE_ID, Config.COMMS_LEAD_2_WRIKE_ID, Config.COMMS_LEAD_3_WRIKE_ID]
             responsibles = [Config.COMMS_LEAD_1_WRIKE_ID, Config.COMMS_LEAD_2_WRIKE_ID, Config.COMMS_LEAD_3_WRIKE_ID]
             customStatus = Config.COMMS_WRIKE_CUSTOM_STATUS_ID
             templateTaskId = Config.TOOLS_AND_RESOURCES_TEMPLATE_TASK_ID
-        elif (taskType == "communitySpotlight"):
+        elif taskType == "communitySpotlight":
             url = 'https://www.wrike.com/api/v4/folders/' + Config.COMMUNITY_SPOTLIGHT_FOLDER_ID + '/tasks'
             followers = [Config.COMMS_LEAD_1_WRIKE_ID, Config.COMMS_LEAD_2_WRIKE_ID, Config.COMMS_LEAD_3_WRIKE_ID]
             responsibles = [Config.COMMS_LEAD_1_WRIKE_ID, Config.COMMS_LEAD_2_WRIKE_ID, Config.COMMS_LEAD_3_WRIKE_ID]
             customStatus = Config.COMMS_WRIKE_CUSTOM_STATUS_ID
             templateTaskId = Config.COMMUNITY_SPOTLIGHT_TEMPLATE_TASK_ID
-        elif (taskType == "research"):
+        elif taskType == "research":
             followers.extend([Config.SUE_WRIKE_ID, Config.JYL_WRIKE_ID])
             responsibles.extend([Config.SUE_WRIKE_ID, Config.JYL_WRIKE_ID])
 
-        if (templateTaskId != ""):
+        if templateTaskId != "":
             templateUrl = 'https://www.wrike.com/api/v4/tasks/' + templateTaskId
             templateResp = requests.get(
                 url=templateUrl,
@@ -1451,35 +1864,36 @@ def create_wrike_task():
                         headers=hed
                     )
 
-        if (resp.status_code == 200):
-            if 'userEmail' in form and form['userEmail'] and 'sendCopy' in form and form['sendCopy'] == 'true':
+        if resp.status_code == 200:
+            if 'userEmail' in form and form['userEmail']:
                 # default to bug form if task type not specified
+                name = form.get("name", form['userEmail'])
                 subject = 'SPARC Reported Error/Issue Submission'
                 body = issue_reporting_email.substitute({'message': description})
-                if (taskType == "feedback"):
+                if taskType == "feedback":
                     subject = 'SPARC Feedback Submission'
                     body = feedback_email.substitute({'message': description})
-                elif (taskType == "interest"):
+                elif taskType == "interest":
                     subject = 'SPARC Service Interest Submission'
-                    body = service_interest_email.substitute({'message': description})
-                elif (taskType == "general"):
+                    body = creation_request_confirmation_email.substitute({'name': name})
+                elif taskType == "general":
                     subject = 'SPARC Question or Inquiry Submission'
                     body = general_interest_email.substitute({'message': description})
-                elif (taskType == "research"):
+                elif taskType == "research":
                     subject = 'SPARC Research Submission'
-                    body = creation_request_confirmation_email.substitute({'message': description})
-                elif (taskType == "news"):
+                    body = creation_request_confirmation_email.substitute({'name': name})
+                elif taskType == "news":
                     subject = 'SPARC News Submission'
-                    body = creation_request_confirmation_email.substitute({'message': description})
-                elif (taskType == "event"):
+                    body = creation_request_confirmation_email.substitute({'name': name})
+                elif taskType == "event":
                     subject = 'SPARC Event Submission'
-                    body = creation_request_confirmation_email.substitute({'message': description})
-                elif (taskType == "toolsAndResources"):
+                    body = creation_request_confirmation_email.substitute({'name': name})
+                elif taskType == "toolsAndResources":
                     subject = 'SPARC Tool/Resource Submission'
-                    body = creation_request_confirmation_email.substitute({'message': description})
-                elif (taskType == "communitySpotlight"):
+                    body = creation_request_confirmation_email.substitute({'name': name})
+                elif taskType == "communitySpotlight":
                     subject = 'SPARC Story Submission'
-                    body = creation_request_confirmation_email.substitute({'message': description})
+                    body = creation_request_confirmation_email.substitute({'name': name})
                 userEmail = form['userEmail']
                 if len(userEmail) > 0:
                     email_sender.sendgrid_email(Config.SES_SENDER, form['userEmail'], subject, body)
@@ -1497,7 +1911,7 @@ def create_wrike_task():
 
 @app.route("/hubspot_contact_properties/<email>", methods=["GET"])
 def get_hubspot_contact_properties(email):
-    url = f"https://api.hubapi.com/crm/v3/objects/contacts/{email}?archived=false&idProperty=email&properties=firstname,lastname,email,newsletter,event_name"
+    url = f"{Config.HUBSPOT_V3_API}/objects/contacts/{email}?archived=false&idProperty=email&properties=firstname,lastname,email,newsletter,event_name"
     headers = {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + Config.HUBSPOT_API_TOKEN
@@ -1581,7 +1995,7 @@ def subscribe_to_newsletter():
             }
         ]
     }
-    url = "https://api.hubapi.com/crm/v3/objects/contacts/batch/upsert"
+    url = f"{Config.HUBSPOT_V3_API}/objects/contacts/batch/upsert"
     headers = {
         "Content-Type": "application/json",
         'Authorization': 'Bearer ' + Config.HUBSPOT_API_TOKEN
@@ -1999,6 +2413,68 @@ def find_by_onto_term():
     return abort(500)
 
 
+@app.route("/dataset_citations/<dataset_id>", methods=["GET"])
+def get_dataset_citations(dataset_id):
+    headers = {
+        'Accept': 'application/json',
+    }
+
+    params = {
+        "api_key": Config.KNOWLEDGEBASE_KEY
+    }
+
+    query = create_citations_query(dataset_id)
+
+    try:
+        response = requests.get(f'{Config.SCI_CRUNCH_CITATIONS_HOST}/_search', headers=headers, params=params, json=query)
+
+        results = response.json()
+        hits = results['hits']['hits']
+        total = results['hits']['total']['value']
+        if total == 1:
+            result = hits[0]
+            json_data = result['_source']
+        else:
+            json_data = {'dataset id': 'not found'}
+
+        return json_data
+    except Exception as ex:
+        logging.error("An error occured while fetching from SciCrunch", ex)
+    return jsonify({ 'message': f"An error occured while fetching citation info for dataset {dataset_id} from SciCrunch" }), 500
+
+@app.route("/total_dataset_citations", methods=["GET"])
+def get_total_dataset_citations():
+    headers = {
+        'Accept': 'application/json',
+    }
+
+    params = {
+        "api_key": Config.KNOWLEDGEBASE_KEY
+    }
+
+    query = {
+        "size": 0,
+        "from": 0,
+        "query": { "match_all": {} },
+        "aggregations": {
+            "Citations": {
+                "terms": {
+                    "field": "citations.type"
+                }
+            }
+        }
+    }
+
+    try:
+        response = requests.get(f'{Config.SCI_CRUNCH_CITATIONS_HOST}/_search', headers=headers, params=params, json=query)
+        results = response.json()
+        buckets = results['aggregations']['Citations']['buckets']
+        total = sum(bucket["doc_count"] for bucket in buckets)
+        return jsonify({ 'total_citations': total }), 200
+    except Exception as ex:
+        logging.error("An error occured while fetching total citations from SciCrunch", ex)
+    return jsonify({ 'total_citations': -1, 'message': "An error occured while fetching total citations from SciCrunch" }), 500
+
 @app.route("/search-readme/<query>", methods=["GET"])
 def search_readme(query):
     url = 'https://dash.readme.com/api/v1/docs/search?search=' + query
@@ -2047,3 +2523,37 @@ def all_dataset_ids():
     string_list = [str(element) for element in list]
     delimiter = ", "
     return delimiter.join(string_list)
+
+@app.route("/total_protocol_views")
+@cache.cached(timeout=180)
+def get_total_protocol_views():
+    table_state = get_protocol_metrics_table_state(protocolMetricsTable)
+    if table_state is None or not table_state.get("total_protocol_views"):
+        return jsonify({
+            "total_views": None,
+            "message": "Total views not yet calculated."
+        }), 202
+    total_protocol_views = table_state.get("total_protocol_views")
+
+    return jsonify({"total_views": total_protocol_views}), 200
+
+@app.route("/contact_support", methods=["POST"])
+def contact_support():
+    data = request.get_json()
+
+    name = data.get("name")
+    email = data.get("email")
+    message = data.get("message")
+    subject = data.get("subject", "SPARC Form Submission Confirmation")
+
+    if not name or not email or not message:
+        return jsonify({"error": "Missing required fields"}), 400
+
+    if email:
+        email_sender.sendgrid_email(Config.SES_SENDER,
+                                    email,
+                                    subject,
+                                    feedback_email.substitute({'message': message}),
+                                    Config.SERVICES_EMAIL)
+
+    return jsonify({"message": "Message received successfully."}), 200

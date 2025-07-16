@@ -1,11 +1,11 @@
 import logging
 from string import Template
-
 import boto3
 import sendgrid
 from app.config import Config
-from sendgrid.helpers.mail import Asm, Content, Email, Mail, To, Attachment, FileName, FileType, Disposition, \
+from sendgrid.helpers.mail import Asm, Cc, Content, Email, Mail, To, Attachment, FileName, FileType, Disposition, \
     FileContent, GroupId, GroupsToDisplay
+from static.sparc_logo_base64 import sparc_logo_base64
 
 subject = "Message from SPARC Portal"
 
@@ -35,16 +35,6 @@ issue_reporting_email = Template('''\
 $message
 ''')
 
-service_interest_email = Template('''\
-<b>Thank you for expressing interest in a SPARC service! We have received your request and will be in contact as soon as possible.</b>
-<br>
-<br>
-Your message:
-<br>
-<br>
-$message
-''')
-
 
 general_interest_email = Template('''\
 <b>Thank you for your submission to SPARC! We have received your question/inquiry and will be in contact as soon as possible.</b>
@@ -56,14 +46,112 @@ Your message:
 $message
 ''')
 
-creation_request_confirmation_email = Template('''\
-<b>Thank you for the following SPARC submission! We have received your request and will be in contact as soon as possible.</b>
-<br>
-<br>
-Your submission:
-<br>
-<br>
-$message
+service_form_submission_request_confirmation_email = Template(f'''\
+<html>
+  <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+
+    <p>Hi $name,</p>
+
+    <p>Thank you for your submission!</p>
+
+    <p>We've successfully received your form and appreciate you taking the time to provide this information. The information you submitted is included below for your records.</p>
+
+    <p>The SPARC Data and Resource Center (DRC) has a depth of expertise in developing and supporting digital resources that can be shared, cited, visualized, computed, and used for virtual experimentation. Your interest in SPARC supports FAIR data principles—making research data Findable, Accessible, Interoperable, and Reusable. We truly appreciate your commitment to contributing to the broader scientific community and supporting efforts that will benefit researchers for years to come.</p>
+
+    <p>Our team will review your submission and make our best effort to get back to you within the next 5 business days. If you have any questions in the meantime, please don't hesitate to contact us at <a href="mailto:services@sparc.science">services@sparc.science</a>.</p>
+
+    <p>Thank you again for your dedication to advancing scientific progress.</p>
+
+    <p>Best regards,<br/>
+    SPARC Data and Resource Center</p>
+
+    <p>
+      <img src="{sparc_logo_base64}" alt="SPARC Logo" style="max-width: 200px; height: auto; margin-bottom: 20px;"/><br/>
+      <a href="https://sparc.science">https://sparc.science</a><br/>
+      NIH-approved, HEAL-compliant repository<br/>
+      Registered with re3data.org
+    </p>
+
+    <p>
+      Your submission:
+      <br/>
+      <br/>
+      $message
+    </p>
+  </body>
+</html>
+''')
+
+creation_request_confirmation_email = Template(f'''\
+<html>
+  <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+
+    <p>Hi $name,</p>
+
+    <p>Thank you for your submission!</p>
+
+    <p>We've successfully received your form and appreciate you taking the time to provide this information. The information you submitted is included below for your records.</p>
+
+    <p>By participating in this process, you're helping advance FAIR data principles—making research data Findable, Accessible, Interoperable, and Reusable. We truly appreciate your commitment to contributing to the broader scientific community and supporting efforts that will benefit researchers for years to come.</p>
+
+    <p>Our team will review your submission and get back to you within the next 3 business days. If you have any questions in the meantime, please don't hesitate to contact us at <a href="mailto:services@sparc.science">services@sparc.science</a>.</p>
+
+    <p>Thank you again for your dedication to advancing scientific progress.</p>
+
+    <p>Best regards,<br/>
+    SPARC Data and Resource Center</p>
+
+    <p>
+      <img src="{sparc_logo_base64}" alt="SPARC Logo" style="max-width: 200px; height: auto; margin-bottom: 20px;"/><br/>
+      <a href="https://sparc.science">https://sparc.science</a><br/>
+      NIH-approved, HEAL-compliant repository<br/>
+      Registered with re3data.org
+    </p>
+
+    <p>
+      Your submission:
+      <br/>
+      <br/>
+      $message
+    </p>
+  </body>
+</html>
+''')
+
+anbc_form_creation_request_confirmation_email = Template(f'''\
+<html>
+  <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+
+    <p>Hi $name,</p>
+
+    <p>Thank you for your submission!</p>
+
+    <p>We've successfully received your form and appreciate you taking the time to provide this information. The information you submitted is included below for your records.</p>
+
+    <p>By participating in this process, you're helping advance FAIR data principles—making research data Findable, Accessible, Interoperable, and Reusable. Through our partnership between Autonomic Neuroscience: Basic and Clinical and <a href="https://sparc.science/">SPARC</a>, we're working together to create a more robust and accessible scientific ecosystem. We truly appreciate your commitment to contributing to the broader scientific community and supporting efforts that will benefit researchers for years to come.</p>
+
+    <p>Our team will review your submission and get back to you within the next 3 business days. If you have any questions in the meantime, please don't hesitate to contact us at <a href="mailto:services@sparc.science">services@sparc.science</a>.</p>
+
+    <p>Thank you again for your dedication to advancing scientific progress.</p>
+
+    <p>Best regards,<br/>
+    SPARC Data and Resource Center</p>
+
+    <p>
+      <img src="{sparc_logo_base64}" alt="SPARC Logo" style="max-width: 200px; height: auto; margin-bottom: 20px;"/><br/>
+      <a href="https://sparc.science">https://sparc.science</a><br/>
+      NIH-approved, HEAL-compliant repository<br/>
+      Registered with re3data.org
+    </p>
+
+    <p>
+      Your submission:
+      <br/>
+      <br/>
+      $message
+    </p>
+  </body>
+</html>
 ''')
 
 class EmailSender(object):
@@ -88,7 +176,6 @@ class EmailSender(object):
             SourceArn=self.ses_arn,
         )
 
-    
     def sendgrid_email_with_attachment(self, fromm, to, subject, body, encoded_file, file_name, file_type):
         mail = Mail(
             Email(fromm),
@@ -109,13 +196,20 @@ class EmailSender(object):
         logging.debug(f"Mail to {to} response\nStatus code: {response.status_code}\n{response.body}")
         return response
 
-    def sendgrid_email(self, fromm, to, subject, body):
+    def sendgrid_email(self, fromm, to, subject, body, cc=None):
         mail = Mail(
             Email(fromm),
             To(to),
             subject,
             Content("text/html", body)
         )
+        if cc:
+          if isinstance(cc, list):
+              for cc_addr in cc:
+                  mail.add_cc(Cc(cc_addr))
+          else:
+              mail.add_cc(Cc(cc))
+
         response = sg_client.send(mail)
         logging.info(f"Sending a '{subject}' mail using SendGrid")
         logging.debug(f"Mail to {to} response\nStatus code: {response.status_code}\n{response.body}")

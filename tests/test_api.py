@@ -86,6 +86,68 @@ def test_get_datasets_by_project(client):
     assert r.status_code == 200
 
 
+def test_annotation_get_share_id_and_state(client):
+    # mock json for testing
+    test_data = { "state" : [
+        {
+            "resource":"placeholder1",
+            "item":{"id":"123"},
+            "body":{"evidence":["https://doi.org/caxdd"],
+            "comment":"asdac",
+            "type":"connectivity",
+            "source":{"label":"body proper","id":1002,"models":"UBERON:0013702"},
+            "target":{"label":"body proper","id":1002,"models":"UBERON:0013702"},
+            "intermediates":[]},
+            "feature":{
+                "id":"safsfa","type":"Feature",
+                "properties":{"drawn":True,"label":"Drawn annotation"},
+                "geometry":{
+                    "coordinates":[
+                        [-12.148524690634474,-12.730414964960303],
+                        [-22.302217020303743,-6.678936298958405]
+                    ],
+                    "type":"LineString"},
+            "connection":{" 1002":{"label":"body proper","id":1002,"models":"UBERON:0013702"}}}
+        },
+        {
+            "resource":"placeholder2","item":{"id":"__annotation/LineString"},
+            "body":{"evidence":[],"comment":"Create"},
+            "feature":{"id":"__annotation/LineString",
+                "properties":{"drawn":True,"label":"Drawn annotation"},
+                "geometry":{
+                    "coordinates":[
+                        [10.914859771728516,3.357909917831421,2.910676956176758],
+                        [9.065815925598145,13.387456893920898,-24.09609031677246]
+                    ],
+                    "type":"MultiLineString"
+                }
+            },
+            "group":"LineString","region":"__annotation"
+        }
+    ]}
+
+    r = client.post(f"/annotation/getshareid", json = {})
+    assert r.status_code == 400
+
+    r = client.post(f"/annotation/getshareid", json = test_data)
+    assert r.status_code == 200
+    assert "uuid" in r.get_json()
+
+    r = client.post(f"/annotation/getstate", json = r.get_json())
+    assert r.status_code == 200
+    returned_data = r.get_json()
+    assert "state" in returned_data
+    assert len(returned_data["state"]) == 2
+    assert returned_data["state"][0]['resource'] == "placeholder1"
+    assert returned_data["state"][1]['resource'] == "placeholder2"
+
+    r = client.post(f"/map/getstate", json = {"uuid": "1234567"})
+    assert r.status_code == 400
+
+    r = client.post(f"/map/getstate", json = {})
+    assert r.status_code == 400
+
+
 def test_map_get_share_id_and_state(client):
     # mock json for testing
     test_data = { "state" : { "type" : "scaffold", "value": 1234 } }
@@ -254,6 +316,18 @@ def test_get_featured_datasets(client):
     assert 'identifiers' in json
     assert type(json['identifiers']) == list
 
+def test_get_protocol_views(client):
+    r = client.get('/total_protocol_views')
+    assert r.status_code in (200, 202)
+    json = r.get_json()
+    assert 'total_views' in json
+
+def test_get_total_dataset_citations(client):
+    r = client.get('/total_dataset_citations')
+    assert r.status_code == 200
+    json = r.get_json()
+    assert 'total_citations' in json
+
 def test_get_reva_subject_ids(client):
     r = client.get('/reva/subject-ids')
     assert r.status_code == 200
@@ -281,3 +355,62 @@ def test_get_reva_landmarks_files(client):
     json = r.get_json()
     assert 'folders' in json
     assert type(json['folders']) == list
+
+def test_create_issue(client):
+    create_response = client.post("/create_issue", data={
+        "title": "test-sparc-api-issue-creation",
+        "body": "This is a test generated from the sparc-api test suite. This ticket should be automatically closed, but if it is not then please do so",
+        "type": "test"
+    })
+
+    create_response_json = create_response.get_json()
+
+    assert create_response.status_code == 201
+    assert create_response_json['status'] == 'success'
+
+    issue_api_url = create_response_json['issue_api_url']
+    assert issue_api_url is not None
+
+    headers = {
+        "Authorization": f"token {Config.SPARC_TECH_LEADS_GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json"
+    }
+
+    close_response = requests.patch(
+        issue_api_url,
+        headers=headers,
+        json={"state": "closed"}
+    )
+
+    assert close_response.status_code == 200
+
+def test_submit_data_inquiry(client):
+    request_response = client.post("/submit_data_inquiry", data={
+        "title": "test-sparc-api-deal-creation",
+        "body": "This is a test generated from the sparc-api test suite. This deal/note should be automatically deleted, but if it is not then please do so",
+        "type": "research",
+        "firstname": "Test",
+        "lastname": "User",
+        "email": "test-api-email@do-not-delete.com"
+    })
+
+    request_response_json = request_response.get_json()
+
+    assert 200 <= request_response.status_code < 300
+
+    for key in ["contact_id", "deal_id", "note_id"]:
+        assert request_response_json.get(key) is not None, f"{key} is missing or None"
+
+    deal_id = request_response_json["deal_id"]
+    note_id = request_response_json["note_id"]
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + Config.HUBSPOT_API_TOKEN
+    }
+    delete_deal_url = f"{Config.HUBSPOT_V3_API}/objects/deals/{deal_id}"
+    delete_deal_response = requests.delete(delete_deal_url, headers=headers)
+    assert delete_deal_response.ok, "Failed to delete test deal"
+
+    delete_note_url = f"{Config.HUBSPOT_V3_API}/objects/notes/{note_id}"
+    delete_note_response = requests.delete(delete_note_url, headers=headers)
+    assert delete_note_response.ok, "Failed to delete test note"
