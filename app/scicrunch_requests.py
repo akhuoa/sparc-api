@@ -1,3 +1,5 @@
+from app.scicrunch_processing_common import get_mimetypes_from_types
+
 #Hardcoded list for getting whole body scaffold,
 #Update this list as needed
 BODY_SCAFFOLD_DATASET = {
@@ -7,6 +9,12 @@ BODY_SCAFFOLD_DATASET = {
     'rat': 147
 }
 
+#Can not use re.escape as forward slash is not included
+#Only include the ones included in mimetype
+sc = str.maketrans({"-": "\\-", ".": "\\.", "/": "\\/", "+": "\\+"})
+
+def escape_query_term(term):
+    return term.translate(sc)
 
 def create_query_string(query_string):
     return {
@@ -350,9 +358,58 @@ def facet_query_string(query, terms, facets, type_map):
             qt += " AND "
     return qt
 
+def get_species_file_types_query(species, file_types):
+    query = {
+                "bool": {
+                    "must": [
+
+                    ]
+                }
+            }
+
+    # Construct the query if there is a list of species 
+    if len(species) > 0:
+        species_query = {
+            "query_string": {
+                "fields": [
+                    "*species.name"
+                ]
+            }
+        }
+
+        query_string = ''
+
+        for item in species:
+            if item != species[0]:
+                query_string += ' OR '
+            query_string += f"({item})"
+        species_query["query_string"]["query"] = query_string
+        query['bool']['must'].append(species_query)
+
+    mimetypes = get_mimetypes_from_types(file_types)
+    
+    if len(mimetypes) > 0:
+        types_query = {
+            "query_string": {
+                "fields": [
+                    "objects.additional_mimetype.name"
+                ]
+            }
+        }
+
+        query_string = ''
+
+        for item in mimetypes:
+            if item != mimetypes[0]:
+                query_string += ' OR '
+            query_string += f"({escape_query_term(item)})"
+        types_query["query_string"]["query"] = query_string
+        query['bool']['must'].append(types_query)
+
+    return query
 
 # create the request body for requesting list of uberon ids
-def create_request_body_for_curies(species):
+def create_request_body_for_curies_aggregations(species, file_types):
     body = {
         "from": 0,
         "size": 0,
@@ -363,29 +420,168 @@ def create_request_body_for_curies(species):
                         "lang": "painless",
                         "inline": "def a=null;if(params['_source']['anatomy'] != null ) { if(params['_source']['anatomy']['organ'] != null ) { a = params['_source']['anatomy']['organ'];}} return a;"
                     },
-                    "size": 200
+                    "size": 400
                 }
             }
         }
     }
 
+    query = get_species_file_types_query(species, file_types)
+
+    body['query'] = query
+
+    return body
+
+
+def get_filters_for_aggregations(curies):
+    filters = {}
+
     # Construct the query if there is a list of species 
-    if len(species) > 0:
-        query = {
-            "query_string": {
-                "fields": [
-                    "*species.name"
-                ],
+    if len(curies) > 0:
+        for item in curies:
+            filters[item] = {
+                "term": { "anatomy.organ.curie.aggregate": item }
+            }
+
+    return filters
+
+# create the request body for requesting list of dataset ids pairing with curies
+def create_request_body_for_ids_aggregations(curies, species, file_types):
+    body = {
+        "size": 0,
+        "aggs": {
+            "f": {
+                "filters": {
+                    "filters": { }
+                },
+                "aggs": {
+                    "id": {
+                        "terms": {"size": 400, "field": "pennsieve.identifier.aggregate"}
+                    }
+                }
             }
         }
+    }
 
-        query_string = ''
+    query = get_species_file_types_query(species, file_types)
 
-        for item in species:
-            if item != species[0]:
-                query_string += ' OR '
-            query_string += f"({item})"
-        query["query_string"]["query"] = query_string
-        body['query'] = query
+    filters = get_filters_for_aggregations(curies)
+
+    body["aggs"]["f"]["filters"]["filters"] = filters
+
+    body['query'] = query
+
+    return body
+
+# Painless script for getting file information out
+def get_script_for_aggregations(file_types):
+    script = {"lang": "painless"}
+
+    mimetypes = get_mimetypes_from_types(file_types)
+
+    conditions = ''
+
+    if len(mimetypes) > 0:
+        conditions = ' && ('
+        cl = []
+        for v in mimetypes:
+            cl.append(f"t == '{v}'")
+        conditions = conditions + ' || '.join(cl) + ")"
+
+    conditions = f'if (t != null{conditions})'
+    inline = "List l = new ArrayList();\
+        def ver = params['_source']['pennsieve']['version']['identifier'];\
+        def id = params['_source']['pennsieve']['identifier'];\
+        List species = new ArrayList();\
+        def subject = null;\
+        if (params['_source']['organisms'] != null) {\
+            if (params['_source']['organisms']['primary'] != null) {\
+                subject = params['_source']['organisms']['primary'];\
+            }\
+            else if (params['_source']['organisms']['subject'] != null)\
+            {\
+                subject = params['_source']['organisms']['subject'];\
+            }\
+        }\
+        if (subject != null && (subject instanceof List))\
+        {\
+            for (sample in subject)\
+            {\
+                if (sample['species'] != null && sample['species']['name'] != null)\
+                {\
+                    species.add(sample['species']['name']);\
+                }\
+            }\
+        }\
+        for (item in params['_source']['objects'])\
+        {\
+            def t = item['additional_mimetype']['name'];"
+    inline = inline + conditions
+    inline = inline + "{String output = id + ',' + ver + ',' + item['dataset']['path'] + \
+                ',' + item['mimetype']['name'] + ',' + t + ',';\
+                String bid = '';\
+                if (item['biolucida'] != null && item['biolucida']['identifier'] != null) { \
+                    output = output + item['biolucida']['identifier'] + ',';\
+                    bid = item['biolucida']['identifier'];\
+                } else {\
+                    output = output + ',';\
+                }\
+                output = output + species + ',';\
+                if (item['datacite'] != null) { \
+                    output = output + item['datacite']['isSourceOf']['path'] + ',' +\
+                    item['datacite']['isDerivedFrom']['path'];\
+                } else {\
+                    output = output + '[],[]';\
+                }"
+
+    #only include if there is a biolucida id
+    if "biolucida-2d" in file_types or "biolucida-3d" in file_types:
+        inline = inline + "if (bid != '') { l.add(output); }"
+    else:
+        inline = inline + "l.add(output);"
+    
+    inline = inline + "}\
+        }\
+        return l;"
+    
+    script["inline"] = inline
+    return script
+
+# create the request body for requesting list of file infos ids pairing with curies
+# The output will be in a command separate list with value
+# of the following properties:
+# dataset id, version, file path, mimetype, additional_mimetype,
+# biolucida id, species, is source of, is derived from
+def create_request_body_for_files_info_aggregations(curies, species, file_types):
+    body = {
+        "size": 0,
+        "aggs": {
+            "f": {
+                "filters": {
+                    "filters": { }
+                },
+                "aggs": {
+                    "files_info": {
+                        "terms": {
+                            "script": { },
+                            "size": 1000
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    query = get_species_file_types_query(species, file_types)
+
+    filters = get_filters_for_aggregations(curies)
+
+    ps = get_script_for_aggregations(file_types)
+
+    body["aggs"]["f"]["aggs"]["files_info"]['terms']['script'] = ps
+
+    body["aggs"]["f"]["filters"]["filters"] = filters
+
+    body['query'] = query
 
     return body
