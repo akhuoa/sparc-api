@@ -6,7 +6,7 @@ from app.config import Config
 
 from timeit import default_timer as timer
 
-from app.scicrunch_processing_common import SCAFFOLD_FILE, PLOT_FILE, COMMON_IMAGES, THUMBNAIL_IMAGE, NAME, BIOLUCIDA_3D, VIDEO, SEGMENTATION_FILES, BIOLUCIDA_2D
+from app.scicrunch_processing_common import SCAFFOLD_FILE, PLOT_FILE, COMMON_IMAGES, THUMBNAIL_IMAGE, NAME, VIDEO, SEGMENTATION_FILES
 from known_dois import current_list, warn_doi_changes
 
 
@@ -58,12 +58,6 @@ def print_search_result(result):
     if COMMON_IMAGES in keys:
         found = True
         messages.append(f" - Found common image: {len(result[COMMON_IMAGES])}")
-    if BIOLUCIDA_2D in keys:
-        found = True
-        messages.append(f" - Found Biolucida 2D image: {len(result[BIOLUCIDA_2D])}")
-    if BIOLUCIDA_3D in keys:
-        found = True
-        messages.append(f" - Found Biolucida 3D image: {len(result[BIOLUCIDA_3D])}")
     if SCAFFOLD_FILE in keys:
         found = True
         messages.append(f" - Found scaffold: {len(result[SCAFFOLD_FILE])}")
@@ -309,16 +303,7 @@ def test_pennsieve_identifier_dataset_search(client):
     result = response['result'][0]
     assert "human islet microvasculature analysis" == result['name'].lower()
 
-    assert BIOLUCIDA_3D in result
-    assert len(result[BIOLUCIDA_3D])
-
     assert 'readme' in result
-
-    first_result = result[BIOLUCIDA_3D][0]
-    print(len(result[BIOLUCIDA_3D]))
-    print(first_result)
-    for r in result[BIOLUCIDA_3D]:
-        print(r['dataset']['path'])
 
 def test_name_mangling_for_s3_resource(client):
     # This test uses a file on dataset 328 which has a file where space is converted to underscore

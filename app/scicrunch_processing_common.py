@@ -4,8 +4,6 @@ NOT_SPECIFIED = 'not-specified'
 SKIP = 'skip'
 
 ADDITIONAL_LINKS = 'additionalLinks'
-BIOLUCIDA_2D = 'biolucida-2d'
-BIOLUCIDA_3D = 'biolucida-3d'
 COMMON_IMAGES = 'common-images'
 CONTEXT_FILE = 'abi-context-file'
 CSV = 'csv'
@@ -27,7 +25,7 @@ README = 'readme'
 TITLE = 'title'
 
 
-PASS_THROUGH_KEYS = [ADDITIONAL_LINKS, BIOLUCIDA_2D, BIOLUCIDA_3D, COMMON_IMAGES, CONTEXT_FILE, CSV, FLATMAP_FILE, NAME, ORGANS, PLOT_FILE, README,
+PASS_THROUGH_KEYS = [ADDITIONAL_LINKS, COMMON_IMAGES, CONTEXT_FILE, CSV, FLATMAP_FILE, NAME, ORGANS, PLOT_FILE, README,
                      SEGMENTATION_FILES, SCAFFOLD_FILE, THUMBNAIL_IMAGE, SCAFFOLD_VIEW_FILE, SIMULATION_FILE, SIMULATION_OMEX_FILE,
                      TITLE, VERSION, VIDEO]
 
@@ -58,10 +56,6 @@ MAPPED_MIME_TYPES = {
     'image/tiff': 'tiff-image',
     'image/tif': 'tiff-image',
     'image/jpeg': COMMON_IMAGES,
-    'image/jpx': BIOLUCIDA_3D,
-    'image/vnd.ome.xml+jpx': BIOLUCIDA_3D,
-    'image/jp2': BIOLUCIDA_2D,
-    'image/vnd.ome.xml+jp2': BIOLUCIDA_2D,
     'model/stl': FE_MODEL,
     'model/obj': FE_MODEL,
     'video/mp4': VIDEO
