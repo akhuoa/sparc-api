@@ -11,7 +11,6 @@ FLATMAP_FILE = 'abi-flatmap-file'
 NAME = 'name'
 ORGANS = 'organs'
 PLOT_FILE = 'abi-plot'
-SEGMENTATION_FILES = 'mbf-segmentation'
 SCAFFOLD_DIR = 'abi-scaffold-dir'
 SCAFFOLD_FILE = 'abi-scaffold-metadata-file'
 THUMBNAIL_IMAGE = 'abi-thumbnail'
@@ -26,13 +25,11 @@ TITLE = 'title'
 
 
 PASS_THROUGH_KEYS = [ADDITIONAL_LINKS, COMMON_IMAGES, CONTEXT_FILE, CSV, FLATMAP_FILE, NAME, ORGANS, PLOT_FILE, README,
-                     SEGMENTATION_FILES, SCAFFOLD_FILE, THUMBNAIL_IMAGE, SCAFFOLD_VIEW_FILE, SIMULATION_FILE, SIMULATION_OMEX_FILE,
+                     SCAFFOLD_FILE, THUMBNAIL_IMAGE, SCAFFOLD_VIEW_FILE, SIMULATION_FILE, SIMULATION_OMEX_FILE,
                      TITLE, VERSION, VIDEO]
 
 MAPPED_MIME_TYPES = {
     'text/csv': CSV,
-    'application/vnd.mbfbioscience.metadata+xml': SEGMENTATION_FILES,
-    'application/vnd.mbfbioscience.neurolucida+xml': SEGMENTATION_FILES,
     'application/x.vnd.abi.context-information+json': CONTEXT_FILE,
     'application/x.vnd.abi.flatmap+json': FLATMAP_FILE,
     'application/x.vnd.abi.scaffold.meta+json': SCAFFOLD_FILE,

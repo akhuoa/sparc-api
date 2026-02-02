@@ -6,7 +6,7 @@ from app.config import Config
 
 from timeit import default_timer as timer
 
-from app.scicrunch_processing_common import SCAFFOLD_FILE, PLOT_FILE, COMMON_IMAGES, THUMBNAIL_IMAGE, NAME, VIDEO, SEGMENTATION_FILES
+from app.scicrunch_processing_common import SCAFFOLD_FILE, PLOT_FILE, COMMON_IMAGES, THUMBNAIL_IMAGE, NAME, VIDEO
 from known_dois import current_list, warn_doi_changes
 
 
@@ -70,10 +70,6 @@ def print_search_result(result):
     if VIDEO in keys:
         found = True
         messages.append(f" - Found video: {len(result[VIDEO])}")
-    if SEGMENTATION_FILES in keys:
-        found = True
-        messages.append(f" - Found segmentation: {len(result[SEGMENTATION_FILES])}")
-
     print(result[NAME])
     if found:
         print('\n'.join(messages))
