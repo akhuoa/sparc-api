@@ -28,9 +28,6 @@ class Config(object):
     SPARC_PORTAL_AWS_SECRET = os.environ.get("SPARC_PORTAL_USER_SECRET")
     OSPARC_API_HOST = os.environ.get("OSPARC_API_HOST", "https://osparc.io/v0")
     AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-    BIOLUCIDA_ENDPOINT = os.environ.get("BIOLUCIDA_ENDPOINT", "https://sparc.biolucida.net/api/v1")
-    BIOLUCIDA_USERNAME = os.environ.get("BIOLUCIDA_USERNAME", "major-user")
-    BIOLUCIDA_PASSWORD = os.environ.get("BIOLUCIDA_PASSWORD", "local-password")
     KNOWLEDGEBASE_KEY = os.environ.get("KNOWLEDGEBASE_KEY", "secret-key")
     DEPLOY_ENV = os.environ.get("DEPLOY_ENV", "development")
     SPARC_API_DEBUGGING = os.environ.get("SPARC_API_DEBUGGING", "TRUE")
@@ -69,7 +66,6 @@ class Config(object):
     OSPARC_API_SECRET = os.environ.get("OSPARC_API_SECRET")
     DIRECT_DOWNLOAD_LIMIT = int(os.environ.get("DIRECT_DOWNLOAD_LIMIT", "20971520"))
     DEFAULT_S3_BUCKET_NAME = "prd-sparc-discover50-use1"
-    NEUROLUCIDA_HOST = os.environ.get("NEUROLUCIDA_HOST", "https://sparc.biolucida.net:8081")
     SCI_CRUNCH_INTERLEX_HOST = os.environ.get("SCI_CRUNCH_INTERLEX_HOST", "https://api.scicrunch.io/elastic/Interlex_pr/v1")
     SCI_CRUNCH_SCIGRAPH_HOST = os.environ.get("SCI_CRUNCH_SCIGRAPH_HOST", "https://scicrunch.org/api/1/sparc-scigraph")
     SCI_CRUNCH_CITATIONS_HOST = os.environ.get("SCI_CRUNCH_CITATIONS_HOST", "https://api.scicrunch.io/elastic/v2/SPARC_Citations_pr")

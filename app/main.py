@@ -49,7 +49,6 @@ from app.scicrunch_requests import create_doi_query, create_filter_request, crea
     create_dataset_flatmap_uuid_query
 from scripts.email_sender import EmailSender, feedback_email, issue_reporting_email, creation_request_confirmation_email, anbc_form_creation_request_confirmation_email, service_form_submission_request_confirmation_email
 from threading import Lock
-from xml.etree import ElementTree
 
 from app.config import Config
 from app.dbtable import AnnotationTable, MapTable, ScaffoldTable, FeaturedDatasetIdSelectorTable, ProtocolMetricsTable
@@ -60,7 +59,6 @@ from app.serializer import ContactRequestSchema
 from app.utilities import img_to_base64_str, get_path_from_mangled_list, get_extension
 from app.osparc.osparc import start_simulation as do_start_simulation
 from app.osparc.osparc import check_simulation as do_check_simulation
-from app.biolucida_process_results import process_results as process_biolucida_results, process_result as process_biolucida_result
 
 import uuid
 
@@ -90,8 +88,6 @@ s3 = boto3.client(
     region_name="us-east-1",
 )
 
-biolucida_lock = Lock()
-
 db_url = Config.DATABASE_URL
 if db_url and db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
@@ -120,33 +116,6 @@ try:
     protocolMetricsTable = None if db_url is None else ProtocolMetricsTable(db_url)
 except AttributeError:
     protocolMetricsTable = None
-
-
-class Biolucida(object):
-    _token = ''
-    _expiry_date = datetime.now() + timedelta(999999)
-    _pending_authentication = False
-
-    @staticmethod
-    def set_token(value):
-        Biolucida._token = value
-
-    def token(self):
-        return self._token
-
-    @staticmethod
-    def set_expiry_date(value):
-        Biolucida._expiry_date = value
-
-    def expiry_date(self):
-        return self._expiry_date
-
-    @staticmethod
-    def set_pending_authentication(value):
-        Biolucida._pending_authentication = value
-
-    def pending_authentication(self):
-        return self._pending_authentication
 
 
 @app.errorhandler(404)
@@ -362,92 +331,6 @@ def create_presigned_url(expiration=3600, bucket_name=Config.DEFAULT_S3_BUCKET_N
     content_type = request.args.get("contentType", "application/octet-stream")
 
     return create_s3_presigned_url(s3BucketName, key, content_type, expiration)
-
-
-@app.route("/thumbnail/neurolucida")
-def thumbnail_from_neurolucida_file():
-    query_args = request.args
-    if 'version' not in query_args or 'datasetId' not in query_args or 'path' not in query_args:
-        return abort(400, description=f"Query arguments are not valid.")
-
-    url = f"{Config.NEUROLUCIDA_HOST}/thumbnail"
-    try:
-        response = requests.get(url, params=query_args, timeout=5)
-        response.raise_for_status()
-        if response.status_code == 200:
-            if response.headers.get('Content-Type', 'unknown') == 'image/png':
-                return base64.b64encode(response.content)
-        abort(400, 'Failed to retrieve thumbnail.')
-
-    except requests.exceptions.ConnectionError:
-        return abort(400, description="Unable to make a connection to NEUROLUCIDA_HOST.")
-    except requests.exceptions.Timeout:
-        return abort(504, 'Request to NEUROLUCIDA_HOST timed out.')
-    except requests.exceptions.RequestException as e:
-        return abort(502, f"Error while requesting NEUROLUCIDA_HOST: {str(e)}")
-
-
-@app.route("/thumbnail/segmentation")
-def extract_thumbnail_from_xml_file(bucket_name=Config.DEFAULT_S3_BUCKET_NAME):
-    """
-    Extract a thumbnail from a mbf xml file.
-    First phase is to find the thumbnail element in the xml document.
-    Second phase is to convert the xml to a base64 png.
-    """
-    query_args = request.args
-    if 'path' not in query_args:
-        return abort(400, description=f"Query arguments are not valid.")
-
-    s3BucketName = query_args.get("s3BucketName", bucket_name)
-    path = query_args['path']
-    resource = None
-    start_tag_found = False
-    end_tag_found = False
-    start_byte = 0
-    offset = 256000
-    end_byte = offset
-    while not start_tag_found or not end_tag_found:
-        try:
-            response = s3.get_object(
-                Bucket=s3BucketName,
-                Key=path,
-                Range=f"bytes={start_byte}-{end_byte}",
-                RequestPayer="requester"
-            )
-        except ClientError as ex:
-            if ex.response['Error']['Code'] == 'NoSuchKey':
-                return abort(404, description=f"Could not find file: '{path}'")
-            else:
-                return abort(404, description=f"Unknown error for file: '{path}'")
-
-        resource = response["Body"].read().decode('UTF-8')
-        start_tag_found = '<thumbnail ' in resource
-        end_tag_found = '</thumbnail>' in resource
-        if start_tag_found and not end_tag_found:
-            end_byte += offset
-        else:
-            start_byte += offset
-            end_byte += offset
-
-        if len(resource) < offset:
-            return abort(404, description=f"Could not find thumbnail in file: '{path}'")
-
-    if resource is None:
-        return abort(404, description=f"Could not find thumbnail in file: '{path}'")
-
-    start_thumbnail_element = resource[resource.find('<thumbnail '):]
-    thumbnail_xml = start_thumbnail_element[:start_thumbnail_element.find('</thumbnail>')] + '</thumbnail>'
-    xml = ElementTree.fromstring(thumbnail_xml)
-    size_info = xml.attrib
-    im_data = ''
-    for child in xml:
-        im_data += child.text[2:]
-
-    byte_im_data = bytes.fromhex(im_data)
-    im = Image.frombytes("RGB", (int(size_info['rows']), int(size_info['cols'])), byte_im_data)
-    base64_form = img_to_base64_str(im)
-
-    return base64_form
 
 
 @app.route("/flatmap/find")
@@ -871,51 +754,6 @@ def get_file_info_original_source():
     return {'result': get_original_source(identifier, doi, discoverId, path, datasetCache)}
 
 
-@app.route("/segmentation_info/")
-def get_segmentation_info_from_file(bucket_name=Config.DEFAULT_S3_BUCKET_NAME):
-    query_args = request.args
-
-    if 'dataset_path' not in query_args:
-        return abort(400, description=f"Query arguments must include 'dataset_path'.")
-
-    s3BucketName = query_args.get("s3BucketName", bucket_name)
-    dataset_path = query_args.get('dataset_path')
-
-    try:
-        # Check the header to see if too large
-        response = s3_header_check(dataset_path, s3BucketName)
-        # Check if file exists
-        if response[0] == 404:
-            abort(404, description=f'Provided path was not found on the s3 resource')
-        response = s3.get_object(
-            Bucket=s3BucketName,
-            Key=dataset_path,
-            RequestPayer="requester"
-        )
-    except ClientError as ex:
-        if ex.response['Error']['Code'] == 'NoSuchKey':
-            return abort(404, description=f"Could not find file: '{dataset_path}'")
-        else:
-            return abort(404, description=f"Unknown error for file: '{dataset_path}'")
-
-    resource = response["Body"].read()
-    xml = ElementTree.fromstring(resource)
-    subject_element = xml.find('./{*}sparcdata/{*}subject')
-    info = {}
-    if subject_element is not None:
-        info['subject'] = subject_element.attrib
-    else:
-        info['subject'] = {'age': '', 'sex': '', 'species': '', 'subjectid': ''}
-
-    atlas_element = xml.find('./{*}sparcdata/{*}atlas')
-    if atlas_element is not None:
-        info['atlas'] = atlas_element.attrib
-    else:
-        info['atlas'] = {'organ': ''}
-
-    return info
-
-
 @app.route("/current_doi_list")
 def get_all_doi():
     query = create_doi_aggregate()
@@ -1199,108 +1037,6 @@ def get_body_scaffold_info(species):
             return result
 
     return abort(404, description=f"Whole body info not found for {species}")
-
-
-@app.route("/thumbnail/<image_id>", methods=["GET"])
-def thumbnail_by_image_id(image_id, recursive_call=False):
-    bl = Biolucida()
-
-    try:
-        with biolucida_lock:
-            if not bl.token():
-                authenticate_biolucida()
-
-        url = Config.BIOLUCIDA_ENDPOINT + "/thumbnail/{0}".format(image_id)
-        headers = {
-            'token': bl.token(),
-        }
-
-        response = requests.request("GET", url, headers=headers)
-        encoded_content = base64.b64encode(response.content)
-        # Response from this endpoint is binary on success so the easiest thing to do is
-        # check for an error response in encoded form.
-        if encoded_content == b'eyJzdGF0dXMiOiJBZG1pbiB1c2VyIGF1dGhlbnRpY2F0aW9uIHJlcXVpcmVkIHRvIHZpZXcvZWRpdCB1c2VyIGluZm8uIFlvdSBtYXkgbmVlZCB0byBsb2cgb3V0IGFuZCBsb2cgYmFjayBpbiB0byByZXZlcmlmeSB5b3VyIGNyZWRlbnRpYWxzLiJ9' \
-                and not recursive_call:
-            # Authentication failure, try again after resetting token.
-            with biolucida_lock:
-                bl.set_token('')
-
-            encoded_content = thumbnail_by_image_id(image_id, True)
-
-        return encoded_content
-    except Exception as ex:
-        logging.error(f"Could not get the thumbnail for {image_id}", ex)
-    return abort(404, "An error occured while fetching the thumbnail")
-
-
-@app.route("/image/<image_id>", methods=["GET"])
-def image_info_by_image_id(image_id):
-    url = Config.BIOLUCIDA_ENDPOINT + "/image/info/{0}".format(image_id)
-    try:
-        response = requests.request("GET", url)
-        return process_biolucida_result(response.json())
-    except Exception as ex:
-        logging.error(f"Could not get image info for {image_id}", ex)
-    return abort(404, "An error occured while getting the image's info")
-
-
-@app.route("/image_search/<dataset_id>", methods=["GET"])
-def image_search_by_dataset_id(dataset_id):
-    url = Config.BIOLUCIDA_ENDPOINT + "/imagemap/search_dataset/discover/{0}".format(dataset_id)
-    try:
-        response = requests.request("GET", url)
-        return response.json()
-    except Exception as ex:
-        logging.error(f"Could not search images for dataset {dataset_id}", ex)
-    return {"error": "An error occured while searching images for dataset"}, 404
-
-
-@app.route("/image_xmp_info/<image_id>", methods=["GET"])
-def image_xmp_info(image_id):
-    url = Config.BIOLUCIDA_ENDPOINT + "/image/xmpmetadata/{0}".format(image_id)
-    try:
-        result = requests.request("GET", url)
-    except requests.exceptions.ConnectionError:
-        return abort(400, description="Unable to make a connection to Biolucida.")
-
-    response = result.json()
-    if response['status'] == 'success':
-        return process_biolucida_results(response['data'])
-
-    return abort(400, description=f"XMP info not found for {image_id}")
-
-
-@app.route("/image_blv_link/<image_id>", methods=["GET"])
-def image_blv_link(image_id):
-    url = Config.BIOLUCIDA_ENDPOINT + "/image/blv_link/{0}".format(image_id)
-    try:
-        result = requests.request("GET", url)
-    except requests.exceptions.ConnectionError:
-        return abort(400, description="Unable to make a connection to Biolucida.")
-
-    response = result.json()
-    if response['status'] == 'success':
-        return jsonify({'link': response['link']})
-
-    return abort(400, description=f"BLV link not found for {image_id}")
-
-
-def authenticate_biolucida():
-    bl = Biolucida()
-    url = Config.BIOLUCIDA_ENDPOINT + "/authenticate"
-
-    payload = {'username': Config.BIOLUCIDA_USERNAME,
-               'password': Config.BIOLUCIDA_PASSWORD,
-               'token': ''}
-    files = [
-    ]
-    headers = {}
-
-    response = requests.request("POST", url, headers=headers, data=payload, files=files)
-    if response.status_code == requests.codes.ok:
-        content = response.json()
-        bl.set_token(content['token'])
-
 
 def get_share_link(table):
     # Commit to database even when testing since the Table re-creates a new session each time to prevent stale sessions
