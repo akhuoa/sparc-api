@@ -45,7 +45,8 @@ from app.scicrunch_requests import create_doi_query, create_filter_request, crea
     create_identifier_query, create_pennsieve_identifier_query, create_field_query, create_request_body_for_curies, \
     create_onto_term_query, \
     create_multiple_doi_query, create_multiple_discoverId_query, create_anatomy_query, get_body_scaffold_dataset_id, \
-    create_multiple_mimetype_query, create_citations_query, create_dataset_flatmap_query
+    create_multiple_mimetype_query, create_citations_query, create_dataset_flatmap_query, \
+    create_dataset_flatmap_uuid_query
 from scripts.email_sender import EmailSender, feedback_email, issue_reporting_email, creation_request_confirmation_email, anbc_form_creation_request_confirmation_email, service_form_submission_request_confirmation_email
 from threading import Lock
 
@@ -53,7 +54,7 @@ from app.config import Config
 from app.dbtable import AnnotationTable, MapTable, ScaffoldTable, FeaturedDatasetIdSelectorTable, ProtocolMetricsTable
 from app.scicrunch_process_results import process_results, process_get_first_scaffold_info, reform_aggregation_results, \
     reform_curies_results, reform_dataset_results, reform_related_terms, reform_anatomy_results, \
-    reform_flatmap_query_result
+    reform_flatmap_query_result, reform_flatmap_uuid_query_result
 from app.serializer import ContactRequestSchema
 from app.utilities import img_to_base64_str, get_path_from_mangled_list, get_extension
 from app.osparc.osparc import start_simulation as do_start_simulation
@@ -394,6 +395,45 @@ def find_associated_flatmap_for_subject():
         return abort(502, description=f"Error while making a request to SCI_CRUNCH_QDB_HOST: {str(e)}")
 
 
+@app.route("/flatmap/uuid")
+def find_associated_dataset_info_for_uuid():
+    """
+    Find dataset info for a given flatmap UUID.
+    The flatmap UUID should be in the form:
+        uuid: 2a3d01c0-39d3-464a-8746-54c9d67ebe0f
+    """
+    query_args = request.args
+    if 'uuid' not in query_args:
+        return abort(400, description="Query arguments are not valid.")
+
+    target_uuid = query_args['uuid']
+
+    sci_crunch_params = {
+        "api_key": Config.KNOWLEDGEBASE_KEY
+    }
+
+    sci_crunch_query = create_dataset_flatmap_uuid_query(target_uuid)
+    results = []
+    try:
+        knowledge_base_response = requests.post(f'{Config.SCI_CRUNCH_HOST}/_search', params=sci_crunch_params, json=sci_crunch_query)
+        knowledge_base_response.raise_for_status()
+        dataset_info = knowledge_base_response.json()
+        associated_dataset_info = reform_flatmap_uuid_query_result(dataset_info, target_uuid)
+        if associated_dataset_info:
+            results.append(associated_dataset_info)
+    except requests.exceptions.ConnectionError:
+        return abort(400, description="Unable to make a connection to SCI_CRUNCH_HOST.")
+    except requests.exceptions.Timeout:
+        return abort(504, description='Request to SCI_CRUNCH_HOST timed out.')
+    except requests.exceptions.RequestException as e:
+        return abort(502, description=f"Error while making a request to SCI_CRUNCH_HOST: {str(e)}")
+
+    if len(results) == 0:
+        return abort(404, description=f"No results for Flatmap UUID '{target_uuid}'.")
+
+    return jsonify(results)
+
+
 @app.route("/exists/<path:path>")
 def url_exists(path, bucket_name=Config.DEFAULT_S3_BUCKET_NAME):
     query_args = request.args
@@ -452,17 +492,17 @@ def s3_header_check(path, bucket_name):
     except botocore.exceptions.ClientError as err:
         # NOTE: This case is required because of https://github.com/boto/boto3/issues/2442
         if err.response["Error"]["Code"] == "404":
-            return (404, f'Provided path was not found on the s3 resource')
+            return 404, f'Provided path was not found on the s3 resource'
         elif err.response["Error"]["Code"] == "403":
-            return (403, f'There is a permission issue when accessing the file at specified path')
+            return 403, f'There is a permission issue when accessing the file at specified path'
         else:
             return abort(err.response["Error"]["Code"], err.response["Error"]["Message"])
     else:
-        return (200, 'OK')
+        return 200, 'OK'
 
 
 # Reverse proxy for objects from S3, a simple get object
-# operation. This is used by scaffoldvuer and its
+# operation. This is used by scaffoldvuer and it's
 # important to keep the relative <path> for accessing
 # other required files.
 @app.route("/s3-resource/<path:path>")
@@ -969,176 +1009,6 @@ def get_featured_dataset():
     except Exception as ex:
         logging.error(f"Could not get featured dataset {featured_dataset_id}", ex)
     abort(404, description="An error occured while fetching the resource")
-
-
-@app.route("/reva/subject-ids", methods=["GET"])
-def getRevaSubjectIds():
-    try:
-        primary_folder = ps2.get(f'/packages/{Config.REVA_3D_TRACING_PRIMARY_FOLDER_COLLECTION_ID}')
-        primary_children = primary_folder['children']
-        subject_ids = []
-        for child in primary_children:
-            if child['content']['packageType'] == 'Collection':
-                subject_ids.append(child['content']['name'])
-        return jsonify({"status": "success", "ids": subject_ids}), 200
-    except Exception as e:
-        logging.error(f"Error while getting REVA subject id files: {e}")
-        return jsonify({"status": "Error while getting REVA subject id files: ", "message": e}), 500
-
-
-def getRevaTracingInSituFolderChildren(subject_id):
-    try:
-        coordinates_folder_name = 'CoordinatesData'
-        in_situ_folder_name = 'InSitu'
-        primary_folder = ps2.get(f'/packages/{Config.REVA_3D_TRACING_PRIMARY_FOLDER_COLLECTION_ID}')
-        if not primary_folder:
-            msg = f"Primary folder not found: {Config.REVA_3D_TRACING_PRIMARY_FOLDER_COLLECTION_ID}"
-            logging.error(msg)
-            return abort(404, description=msg)
-
-        primary_children = primary_folder.get('children', [])
-        subject_child = next((child for child in primary_children if child['content']['name'] == subject_id), None)
-        if subject_child is None:
-            msg = f"Subject folder not found for subject id: {subject_id}"
-            logging.error(msg)
-            return abort(404, description=msg)
-
-        subject_folder = ps2.get(f"/packages/{subject_child['content']['id']}")
-        if not subject_folder:
-            msg = f"Subject folder could not be fetched for id: {subject_child['content']['id']}"
-            logging.error(msg)
-            return abort(404, description=msg)
-
-        subject_children = subject_folder.get('children', [])
-        coordinates_child = next((child for child in subject_children if child['content']['name'] == coordinates_folder_name), None)
-        if coordinates_child is None:
-            msg = f"CoordinatesData folder not found for subject: {subject_id}"
-            logging.error(msg)
-            return abort(404, description=msg)
-
-        coordinates_folder = ps2.get(f"/packages/{coordinates_child['content']['id']}")
-        if not coordinates_folder:
-            msg = f"CoordinatesData folder could not be fetched for id: {coordinates_child['content']['id']}"
-            logging.error(msg)
-            return abort(404, description=msg)
-
-        coordinates_children = coordinates_folder.get('children', [])
-        in_situ_child = next((child for child in coordinates_children if child['content']['name'] == in_situ_folder_name), None)
-        if in_situ_child is None:
-            msg = f"InSitu folder not found for subject: {subject_id}"
-            logging.error(msg)
-            return abort(404, description=msg)
-
-        # Get in situ folder
-        in_situ_folder = ps2.get(f"/packages/{in_situ_child['content']['id']}")
-        if not in_situ_folder:
-            msg = f"InSitu folder could not be fetched for id: {in_situ_child['content']['id']}"
-            logging.error(msg)
-            return abort(404, description=msg)
-
-        return in_situ_folder.get('children', [])
-
-    except Exception as e:
-        msg = f"Exception thrown when getting Reva InSitu Folder: {e}"
-        logging.error(msg)
-        return abort(500, description=msg)
-
-
-@app.route("/reva/anatomical-landmarks-files/<subject_id>", methods=["GET"])
-def getRevaAnatomicalLandmarksFiles(subject_id):
-    try:
-        anatomical_landmarks_folder_name = 'AnatomicalLandmarks'
-        in_situ_children = getRevaTracingInSituFolderChildren(subject_id)
-        anatomical_landmarks_child = next((child for child in in_situ_children if child['content']['name'] == anatomical_landmarks_folder_name), None)
-        if anatomical_landmarks_child is None:
-            logging.error(f"REVA tracing folder {anatomical_landmarks_folder_name} not found for subject: {subject_id}")
-            return jsonify({"status": "ERROR", "message": f"{anatomical_landmarks_folder_name} folder not found for subject: {subject_id}"}), 404
-        anatomical_landmarks_folder = ps2.get(f"/packages/{anatomical_landmarks_child['content']['id']}")
-        anatomical_landmarks_children = anatomical_landmarks_folder['children']
-        anatomical_landmarks_folders = []
-        for anatomical_landmark_child in anatomical_landmarks_children:
-            landmark_folder_name = anatomical_landmark_child['content']['name']
-            landmark_folder_id = anatomical_landmark_child['content']['id']
-            anatomical_landmark_folder = ps2.get(f"/packages/{landmark_folder_id}")
-            landmark_children = anatomical_landmark_folder['children']
-            landmark_files = []
-            for landmark_child in landmark_children:
-                landmark_file_package_id = landmark_child['content']['id']
-                landmark_file = ps2.get(f"/packages/{landmark_file_package_id}/view")
-                landmark_file_id = landmark_file[0]['content']['id']
-                landmark_file_presigned_url = ps2.get(f"/packages/{landmark_file_package_id}/files/{landmark_file_id}")['url']
-                landmark_files.append({'name': str(landmark_child['content']['name']), 's3Url': str(landmark_file_presigned_url)})
-            anatomical_landmarks_folders.append({'name': str(landmark_folder_name), 'files': landmark_files})
-        return jsonify({"status": "success", "folders": anatomical_landmarks_folders}), 200
-    except Exception as e:
-        logging.error(f"Error while getting REVA anatomical landmarks files {e}")
-        return jsonify({"status": "Error while getting anatomical landmarks files: ", "message": e}), 500
-
-
-@app.route("/reva/tracing-files/<subject_id>", methods=["GET"])
-def getRevaTracingFiles(subject_id):
-    try:
-        vagus_nerve_folder_name = 'VagusNerve'
-        in_situ_children = getRevaTracingInSituFolderChildren(subject_id)
-        vagus_nerve_child = next((child for child in in_situ_children if child['content']['name'] == vagus_nerve_folder_name), None)
-        if vagus_nerve_child is None:
-            logging.error(f"REVA tracing folder {vagus_nerve_folder_name} not found for subject: {subject_id}")
-            return jsonify({"status": "ERROR", "message": f"{vagus_nerve_folder_name} folder not found for subject: {subject_id}"}), 404
-        vagus_nerve_folder = ps2.get(f"/packages/{vagus_nerve_child['content']['id']}")
-        vagus_nerve_children = vagus_nerve_folder['children']
-        vagus_tracing_files = []
-        for vagus_region_child in vagus_nerve_children:
-            vagus_region_folder = ps2.get(f"/packages/{vagus_region_child['content']['id']}")
-            # get file and use id and package id for getting the presigned url https://api.pennsieve.io/packages/{id}/view
-            vagus_region_children = vagus_region_folder['children']
-            for vagus_file_child in vagus_region_children:
-                file_package_id = vagus_file_child['content']['id']
-                vagus_file = ps2.get(f"/packages/{file_package_id}/view")
-                vagus_file_id = vagus_file[0]['content']['id']
-                vagus_file_presigned_url = ps2.get(f"/packages/{file_package_id}/files/{vagus_file_id}")['url']
-                vagus_tracing_files.append(
-                    {'name': str(vagus_file_child['content']['name']), 'region': str(vagus_region_child['content']['name']), 's3Url': str(vagus_file_presigned_url)})
-        return jsonify({"status": "success", "files": vagus_tracing_files}), 200
-    except Exception as e:
-        logging.error(f"Error while getting REVA tracing files {e}")
-        return jsonify({"status": "Error while getting tracing files: ", "message": e}), 500
-
-
-@app.route("/reva/micro-ct-files/<subject_id>", methods=["GET"])
-def getRevaMicroCtFiles(subject_id):
-    micro_ct_visualization_folder_name = f'{subject_id}-MicroCTVisualization'
-
-    try:
-        primary_folder = ps2.get(f'/packages/{Config.REVA_MICRO_CT_PRIMARY_FOLDER_COLLECTION_ID}')
-        primary_children = primary_folder['children']
-        subject_child = next((child for child in primary_children if child['content']['name'] == subject_id), None)
-        if subject_child is None:
-            logging.error(f'REVA microCT folder not found with subject id: {subject_id}')
-            return jsonify({"status": "ERROR", "message": f"MicroCT folder not found with subject id: {subject_id}"}), 404
-        subject_folder = ps2.get(f"/packages/{subject_child['content']['id']}")
-        subject_children = subject_folder['children']
-        micro_ct_child = next((child for child in subject_children if child['content']['name'] == micro_ct_visualization_folder_name), None)
-        if micro_ct_child is None:
-            logging.error(f'REVA microCT {micro_ct_visualization_folder_name} folder not found for subject: {subject_id}')
-            return jsonify({"status": "ERROR", "message": f"{micro_ct_visualization_folder_name} folder not found for subject: {subject_id}"}), 404
-        micro_ct_visualization_folder = ps2.get(f"/packages/{micro_ct_child['content']['id']}")
-        micro_ct_children = micro_ct_visualization_folder['children']
-        micro_ct_files = []
-        for micro_child in micro_ct_children:
-            file_package_id = micro_child['content']['id']
-            micro_child_file = ps2.get(f"/packages/{file_package_id}/view")
-            micro_child_file_id = micro_child_file[0]['content']['id']
-            micro_file_presigned_url = ps2.get(f"/packages/{file_package_id}/files/{micro_child_file_id}")['url']
-            file_name = micro_child['content']['name']
-            file_size = micro_child['storage']
-            package_type = micro_child['content']['packageType']
-            file_type = micro_child_file[0]['content']['fileType']
-            micro_ct_files.append(
-                {'name': str(file_name), 's3Url': str(micro_file_presigned_url), 'type': str(file_type), 'packageType': str(package_type), 'size': str(file_size)})
-        return jsonify({"status": "success", "files": micro_ct_files}), 200
-    except Exception as e:
-        logging.error(f"Error while getting REVA microCT files {e}")
-        return jsonify({"status": "Error while getting microCT files: ", "message": e}), 500
 
 
 @app.route("/get_owner_email/<int:owner_id>", methods=["GET"])
@@ -2042,8 +1912,8 @@ def pmr_file():
                 return resp.json()
         except:
             abort(400, description="invalid path")
-    else:
-        abort(400, description="missing path")
+
+    abort(400, description="missing path")
 
 
 @app.route("/start_simulation", methods=["POST"])
